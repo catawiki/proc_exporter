@@ -26,7 +26,7 @@ type (
 
 	Matcher interface {
 		// Match returns empty string for no match, or the group name on success.
-		Match(NameAndCmdline) bool
+		Match(NameAndCmdline) (bool, map[string]string)
 	}
 
 	FirstMatcher []MatchNamer
@@ -44,8 +44,7 @@ type (
 	}
 
 	cmdlineMatcher struct {
-		regexes  []*regexp.Regexp
-		captures map[string]string
+		regexes []*regexp.Regexp
 	}
 
 	andMatcher []Matcher
@@ -77,17 +76,9 @@ func (f FirstMatcher) MatchAndName(nacl NameAndCmdline) (bool, string) {
 }
 
 func (m *matchNamer) MatchAndName(nacl NameAndCmdline) (bool, string) {
-	if !m.Match(nacl) {
+	ok, matches := m.Match(nacl)
+	if !ok {
 		return false, ""
-	}
-
-	matches := make(map[string]string)
-	for _, m := range m.andMatcher {
-		if mc, ok := m.(*cmdlineMatcher); ok {
-			for k, v := range mc.captures {
-				matches[k] = v
-			}
-		}
 	}
 
 	exebase, exefull := nacl.Name, nacl.Name
@@ -106,52 +97,61 @@ func (m *matchNamer) MatchAndName(nacl NameAndCmdline) (bool, string) {
 	return true, buf.String()
 }
 
-func (m *commMatcher) Match(nacl NameAndCmdline) bool {
+func (m *commMatcher) Match(nacl NameAndCmdline) (bool, map[string]string) {
 	_, found := m.comms[nacl.Name]
-	return found
+	return found, nil
 }
 
-func (m *exeMatcher) Match(nacl NameAndCmdline) bool {
+func (m *exeMatcher) Match(nacl NameAndCmdline) (bool, map[string]string) {
 	if len(nacl.Cmdline) == 0 {
-		return false
+		return false, nil
 	}
 	thisbase := filepath.Base(nacl.Cmdline[0])
 	fqpath, found := m.exes[thisbase]
 	if !found {
-		return false
+		return false, nil
 	}
 	if fqpath == "" {
-		return true
+		return true, nil
 	}
 
-	return fqpath == nacl.Cmdline[0]
+	return fqpath == nacl.Cmdline[0], nil
 }
 
-func (m *cmdlineMatcher) Match(nacl NameAndCmdline) bool {
+func (m *cmdlineMatcher) Match(nacl NameAndCmdline) (bool, map[string]string) {
+	matches := make(map[string]string)
+
 	for _, regex := range m.regexes {
-		captures := regex.FindStringSubmatch(strings.Join(nacl.Cmdline, " "))
-		if m.captures == nil {
-			return false
+		regexCaptures := regex.FindStringSubmatch(strings.Join(nacl.Cmdline, " "))
+		if regexCaptures == nil {
+			return false, nil
 		}
 		subexpNames := regex.SubexpNames()
-		if len(subexpNames) != len(captures) {
-			return false
+		if len(subexpNames) != len(regexCaptures) {
+			return false, nil
 		}
 
 		for i, name := range subexpNames {
-			m.captures[name] = captures[i]
+			matches[name] = regexCaptures[i]
 		}
 	}
-	return true
+	return true, matches
 }
 
-func (m andMatcher) Match(nacl NameAndCmdline) bool {
+func (m andMatcher) Match(nacl NameAndCmdline) (bool, map[string]string) {
+	allMatches := make(map[string]string)
 	for _, matcher := range m {
-		if !matcher.Match(nacl) {
-			return false
+		ok, matches := matcher.Match(nacl)
+		if !ok {
+			return false, nil
+		}
+		if matches != nil {
+			for k, v := range matches {
+				allMatches[k] = v
+			}
 		}
 	}
-	return true
+	return true, allMatches
 }
 
 // ReadRecipesFile opens the named file and extracts recipes from it.
@@ -258,8 +258,7 @@ func getMatchNamer(yamlmn interface{}) (MatchNamer, error) {
 			rs = append(rs, r)
 		}
 		matchers = append(matchers, &cmdlineMatcher{
-			regexes:  rs,
-			captures: make(map[string]string),
+			regexes: rs,
 		})
 	}
 	if len(matchers) == 0 {
